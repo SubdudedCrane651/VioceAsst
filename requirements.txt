@@ -1,0 +1,6 @@
+PyQt6
+soundevice
+vosk
+pyaudio
+faster-whisper
+numpy

@@ -3,26 +3,48 @@ import threading
 import subprocess
 import time
 import json
+import os
+
 import numpy as np
 import sounddevice as sd
-
 from vosk import Model, KaldiRecognizer
+
 from PyQt6.QtWidgets import QApplication, QWidget, QVBoxLayout, QPushButton, QLabel
 from PyQt6.QtCore import Qt, pyqtSignal, QObject
 
 
 # -----------------------------
-# VOSK MODEL (use the large one)
+# CONFIG
 # -----------------------------
-MODEL_PATH = r"C:\models\vosk-model-en-us-0.22"
-model = Model(MODEL_PATH)
+VOSK_MODEL_PATH = r"C:\models\vosk-model-en-us-0.22"
+SAMPLE_RATE = 16000
+COMMANDS_FILE = "commands.json"
 
 
 # -----------------------------
-# STT: voice -> text
+# Load commands.json
 # -----------------------------
-def transcribe_audio(audio_data, sample_rate):
-    recognizer = KaldiRecognizer(model, sample_rate)
+def load_commands():
+    if not os.path.exists(COMMANDS_FILE):
+        print("commands.json not found!")
+        return {}
+    with open(COMMANDS_FILE, "r") as f:
+        return json.load(f)
+
+commands = load_commands()
+
+
+# -----------------------------
+# MODELS
+# -----------------------------
+vosk_model = Model(VOSK_MODEL_PATH)
+
+
+# -----------------------------
+# STT: Vosk (commands)
+# -----------------------------
+def transcribe_vosk(audio_data, sample_rate):
+    recognizer = KaldiRecognizer(vosk_model, sample_rate)
     recognizer.SetWords(True)
 
     pcm_data = (audio_data * 32767).astype("int16").tobytes()
@@ -38,27 +60,37 @@ def transcribe_audio(audio_data, sample_rate):
 
 
 # -----------------------------
-# Command router
+# Command router (JSON-based)
 # -----------------------------
 def handle_command(text: str):
-    cmd = text.lower()
+    cmd = text.lower().strip()
     print(f"[assistant] understood: {cmd}")
 
-    if "open" in cmd and "notepad" in cmd:
-        subprocess.Popen("notepad.exe")
-        return "Opening Notepad."
+    # fuzzy match: find closest command key
+    best_key = None
+    for key in commands.keys():
+        if key in cmd:
+            best_key = key
+            break
 
-    if "open" in cmd and "chrome" in cmd:
-        subprocess.Popen(
-            r"C:\Program Files\Google\Chrome\Application\chrome.exe",
-            shell=True
-        )
-        return "Opening Chrome."
+    if not best_key:
+        return "I don't know how to do that yet."
 
-    if "volume up" in cmd:
-        return "Volume up (stub)."
+    entry = commands[best_key]
+    action = entry.get("action")
+    target = entry.get("target")
 
-    return "I don't know how to do that yet."
+    if action == "run":
+        subprocess.Popen(target, shell=True)
+        return f"Running {target}"
+
+    if action == "system":
+        if target == "volume_up":
+            return "Volume up."
+        if target == "close_window":
+            return "Closing window."
+
+    return "Command found but no action implemented."
 
 
 # -----------------------------
@@ -69,7 +101,7 @@ class WorkerSignals(QObject):
 
 
 # -----------------------------
-# Audio worker thread
+# Audio worker (Vosk STT)
 # -----------------------------
 class AudioWorker(threading.Thread):
     def __init__(self, signals: WorkerSignals, duration: float = 4.0):
@@ -80,7 +112,7 @@ class AudioWorker(threading.Thread):
     def run(self):
         try:
             self.signals.status.emit("Listening...")
-            sample_rate = 16000
+            sample_rate = SAMPLE_RATE
 
             self.signals.status.emit("Recording...")
             audio = sd.rec(
@@ -93,7 +125,7 @@ class AudioWorker(threading.Thread):
             audio = audio.flatten()
 
             self.signals.status.emit("Transcribing...")
-            text = transcribe_audio(audio, sample_rate)
+            text = transcribe_vosk(audio, sample_rate)
             if not text:
                 self.signals.status.emit("I didn't catch that.")
                 return

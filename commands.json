@@ -1,0 +1,18 @@
+{
+    "open notepad": {
+        "action": "run",
+        "target": "notepad.exe"
+    },
+    "open chrome": {
+        "action": "run",
+        "target": "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe"
+    },
+    "volume up": {
+        "action": "system",
+        "target": "volume_up"
+    },
+    "close window": {
+        "action": "system",
+        "target": "close_window"
+    }
+}
