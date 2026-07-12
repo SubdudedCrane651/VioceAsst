@@ -15,11 +15,11 @@ from PyQt6.QtCore import Qt, pyqtSignal, QObject
 
 
 # ---- CONFIG ----
-VOSK_MODEL_PATH = r"C:\models\vosk-model-en-us-0.22"  # change to your model path
+VOSK_MODEL_PATH = r"C:\models\vosk-model-en-us-0.22"
 SAMPLE_RATE = 16000
+BLOCKSIZE = 4000  # 0.25s per block
 COMMANDS_FILE = "commands.json"
 WAKEWORD = "computer"
-BLOCKSIZE = 4000  # 0.25s per block at 16kHz
 
 
 # -----------------------------
@@ -31,33 +31,21 @@ def load_commands():
     with open(COMMANDS_FILE, "r", encoding="utf-8") as f:
         return json.load(f)
 
-
 commands = load_commands()
 vosk_model = Model(VOSK_MODEL_PATH)
 
 
 # -----------------------------
-# SAFE FLOAT32 → INT16 (for Talk button)
-# -----------------------------
-def float32_to_int16(audio):
-    data = audio.flatten()
-    data = np.nan_to_num(data, nan=0.0, posinf=0.0, neginf=0.0)
-    data = np.clip(data, -1.0, 1.0)
-    return (data * 32767).astype(np.int16).tobytes()
-
-
-# -----------------------------
-# NOISE SUPPRESSION (light)
+# NOISE SUPPRESSION
 # -----------------------------
 def noise_suppress(audio_bytes, threshold=200):
     data = np.frombuffer(audio_bytes, dtype=np.int16).copy()
-    mask = np.abs(data) < threshold
-    data[mask] = 0
+    data[np.abs(data) < threshold] = 0
     return data.astype(np.int16).tobytes()
 
 
 # -----------------------------
-# AUTO-GAIN CONTROL (gentle)
+# AUTO-GAIN CONTROL
 # -----------------------------
 def apply_agc(audio_bytes):
     data = np.frombuffer(audio_bytes, dtype=np.int16).copy()
@@ -72,7 +60,6 @@ def apply_agc(audio_bytes):
 # -----------------------------
 def handle_command(text: str) -> str:
     cmd = text.lower().strip()
-
     keys = list(commands.keys())
     match = difflib.get_close_matches(cmd, keys, n=1, cutoff=0.55)
 
@@ -81,34 +68,23 @@ def handle_command(text: str) -> str:
 
     best_key = match[0]
     entry = commands[best_key]
-    action = entry.get("action")
-    target = entry.get("target")
 
-    if action == "run":
-        subprocess.Popen(target, shell=True)
+    if entry.get("action") == "run":
+        subprocess.Popen(entry.get("target"), shell=True)
         return f"Running {best_key}"
-
-    if action == "system":
-        if target == "volume_up":
-            return "Volume up."
-        if target == "close_window":
-            return "Closing window."
 
     return "Command found but no action implemented."
 
 
 # -----------------------------
-# FUZZY WAKEWORD MATCHING
+# WAKEWORD MATCHING
 # -----------------------------
 def is_wakeword(text: str) -> bool:
     text = text.lower().strip()
-
     if WAKEWORD in text:
         return True
-
     candidates = ["computer", "compter", "commuter", "comp you ter"]
-    matches = difflib.get_close_matches(text, candidates, cutoff=0.70)
-    return len(matches) > 0
+    return len(difflib.get_close_matches(text, candidates, cutoff=0.70)) > 0
 
 
 # -----------------------------
@@ -119,13 +95,13 @@ class UiSignals(QObject):
 
 
 # -----------------------------
-# CONTINUOUS WAKEWORD + 5s COMMAND LISTENING
+# MAIN LISTENER THREAD
 # -----------------------------
 class KWSStream(threading.Thread):
     def __init__(self, signals: UiSignals):
         super().__init__(daemon=True)
         self.signals = signals
-        self._running = True
+        self.running = True
 
     def run(self):
         recognizer = KaldiRecognizer(vosk_model, SAMPLE_RATE)
@@ -137,13 +113,12 @@ class KWSStream(threading.Thread):
             dtype="int16",
             channels=1,
         ) as stream:
-            while self._running:
+
+            while self.running:
                 raw = stream.read(BLOCKSIZE)[0]
-                data = bytes(raw)
+                data = apply_agc(noise_suppress(bytes(raw)))
 
-                data = noise_suppress(data)
-                data = apply_agc(data)
-
+                # Wake-word detection
                 if recognizer.AcceptWaveform(data):
                     result = recognizer.Result()
                 else:
@@ -151,37 +126,36 @@ class KWSStream(threading.Thread):
 
                 try:
                     j = json.loads(result)
-                except Exception:
+                except:
                     continue
 
                 text = j.get("text", "") or j.get("partial", "")
                 text = text.strip().lower()
+
                 if not text:
                     continue
 
-                # Wake-word detection
                 if is_wakeword(text):
                     winsound.Beep(1200, 120)
                     self.signals.status.emit("Wake-word COMPUTER detected. Listening for 5 seconds…")
                     self.listen_for_command(stream)
-                    # after this returns, loop continues and waits for wake word again
+                    self.signals.status.emit("Sleeping… Say 'computer' to wake me.")
+                    recognizer = KaldiRecognizer(vosk_model, SAMPLE_RATE)
                     continue
 
     def listen_for_command(self, stream):
-        """Use the SAME stream to record ~5 seconds and process as a command."""
+        """Record 5 seconds using SAME stream."""
         duration = 5.0
         total_samples = int(duration * SAMPLE_RATE)
-        collected = []
         samples = 0
+        chunks = []
 
-        while samples < total_samples and self._running:
+        while samples < total_samples and self.running:
             raw = stream.read(BLOCKSIZE)[0]
-            collected.append(bytes(raw))
+            chunks.append(bytes(raw))
             samples += BLOCKSIZE
 
-        audio_bytes = b"".join(collected)
-        audio_bytes = noise_suppress(audio_bytes)
-        audio_bytes = apply_agc(audio_bytes)
+        audio_bytes = apply_agc(noise_suppress(b"".join(chunks)))
 
         recognizer = KaldiRecognizer(vosk_model, SAMPLE_RATE)
         if recognizer.AcceptWaveform(audio_bytes):
@@ -203,49 +177,44 @@ class KWSStream(threading.Thread):
         self.signals.status.emit(response)
 
     def stop(self):
-        self._running = False
+        self.running = False
 
 
 # -----------------------------
 # ONE-SHOT LISTENER (Talk button)
 # -----------------------------
 class OneShotListener(threading.Thread):
-    def __init__(self, signals: UiSignals, duration: float = 4.0):
+    def __init__(self, signals: UiSignals):
         super().__init__(daemon=True)
         self.signals = signals
-        self.duration = duration
 
     def run(self):
-        try:
-            self.signals.status.emit("Listening…")
-            audio = sd.rec(
-                int(self.duration * SAMPLE_RATE),
-                samplerate=SAMPLE_RATE,
-                channels=1,
-                dtype="float32",
-            )
-            sd.wait()
+        self.signals.status.emit("Listening…")
+        audio = sd.rec(int(4 * SAMPLE_RATE), samplerate=SAMPLE_RATE, channels=1, dtype="float32")
+        sd.wait()
 
-            audio_bytes = float32_to_int16(audio)
-            audio_bytes = noise_suppress(audio_bytes)
-            audio_bytes = apply_agc(audio_bytes)
+        data = audio.flatten()
+        data = np.nan_to_num(data)
+        data = np.clip(data, -1.0, 1.0)
+        audio_bytes = (data * 32767).astype(np.int16).tobytes()
 
-            recognizer = KaldiRecognizer(vosk_model, SAMPLE_RATE)
-            if recognizer.AcceptWaveform(audio_bytes):
-                result = recognizer.Result()
-            else:
-                result = recognizer.FinalResult()
+        audio_bytes = apply_agc(noise_suppress(audio_bytes))
 
-            j = json.loads(result)
-            text = j.get("text", "").strip()
-            if not text:
-                self.signals.status.emit("I didn't catch that.")
-                return
+        recognizer = KaldiRecognizer(vosk_model, SAMPLE_RATE)
+        if recognizer.AcceptWaveform(audio_bytes):
+            result = recognizer.Result()
+        else:
+            result = recognizer.FinalResult()
 
-            response = handle_command(text)
-            self.signals.status.emit(response)
-        except Exception as e:
-            self.signals.status.emit(f"Error: {e}")
+        j = json.loads(result)
+        text = j.get("text", "").strip()
+
+        if not text:
+            self.signals.status.emit("I didn't catch that.")
+            return
+
+        response = handle_command(text)
+        self.signals.status.emit(response)
 
 
 # -----------------------------
@@ -260,7 +229,7 @@ class VoiceWindow(QWidget):
         layout = QVBoxLayout()
         layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
-        self.label = QLabel("Say “computer” then your command,\nor press Talk.")
+        self.label = QLabel("Say “computer” then your command.\nSleeping until wake word.")
         self.label.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
         self.button = QPushButton("Talk")
@@ -280,12 +249,11 @@ class VoiceWindow(QWidget):
         self.label.setText(msg)
 
     def on_button_clicked(self):
-        listener = OneShotListener(self.signals, duration=4.0)
+        listener = OneShotListener(self.signals)
         listener.start()
 
     def closeEvent(self, event):
-        if hasattr(self, "kws"):
-            self.kws.stop()
+        self.kws.stop()
         event.accept()
 
 
