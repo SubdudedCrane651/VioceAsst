@@ -1,18 +1,83 @@
 {
-    "open notepad": {
-        "action": "run",
-        "target": "notepad.exe"
-    },
-    "open chrome": {
+  "open word": {
+    "action": "run",
+    "target": "\"%ProgramFiles%\\Microsoft Office\\root\\Office16\\WINWORD.EXE\""
+  },
+  "open excel": {
+    "action": "run",
+    "target": "\"%ProgramFiles%\\Microsoft Office\\root\\Office16\\EXCEL.EXE\""
+  },
+  "open powerpoint": {
+    "action": "run",
+    "target": "\"%ProgramFiles%\\Microsoft Office\\root\\Office16\\POWERPNT.EXE\""
+  },
+  "open outlook": {
+    "action": "run",
+    "target": "\"%ProgramFiles%\\Microsoft Office\\root\\Office16\\OUTLOOK.EXE\""
+  },
+  "open access": {
+    "action": "run",
+    "target": "\"%ProgramFiles%\\Microsoft Office\\root\\Office16\\MSACCESS.EXE\""
+  },
+  "open publisher": {
+    "action": "run",
+    "target": "\"%ProgramFiles%\\Microsoft Office\\root\\Office16\\MSPUB.EXE\""
+  },
+  "open onenote": {
+    "action": "run",
+    "target": "\"%ProgramFiles%\\Microsoft Office\\root\\Office16\\ONENOTE.EXE\""
+  },
+"open chrome": {
         "action": "run",
         "target": "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe"
-    },
-    "volume up": {
-        "action": "system",
-        "target": "volume_up"
-    },
-    "close window": {
-        "action": "system",
-        "target": "close_window"
-    }
+  },
+  "open notepad": {
+    "action": "run",
+    "target": "notepad.exe"
+  },
+  "open paint": {
+    "action": "run",
+    "target": "mspaint.exe"
+  },
+  "open calculator": {
+    "action": "run",
+    "target": "calc.exe"
+  },
+  "open explorer": {
+    "action": "run",
+    "target": "explorer.exe"
+  },
+  "open settings": {
+    "action": "run",
+    "target": "ms-settings:"
+  },
+  "open task manager": {
+    "action": "run",
+    "target": "taskmgr.exe"
+  },
+  "open command prompt": {
+    "action": "run",
+    "target": "cmd.exe"
+  },
+  "open powershell": {
+    "action": "run",
+    "target": "powershell.exe"
+  },
+  "open windows terminal": {
+    "action": "run",
+    "target": "wt.exe"
+  },
+
+  "open edge": {
+    "action": "run",
+    "target": "msedge.exe"
+  },
+  "open visual studio": {
+    "action": "run",
+    "target": "devenv.exe"
+  },
+  "open vscode": {
+    "action": "run",
+    "target": "code.exe"
+  }
 }

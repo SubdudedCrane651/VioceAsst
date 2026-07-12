@@ -1,3 +1,5 @@
+A nifty Python PyQt6 Voice command opener for many Microsoft apps and alike.
+
 ⭐ Download the correct model
 Download this one:
 
