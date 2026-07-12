@@ -15,10 +15,11 @@ from PyQt6.QtCore import Qt, pyqtSignal, QObject
 
 
 # ---- CONFIG ----
-VOSK_MODEL_PATH = r"C:\models\vosk-model-en-us-0.22"  # <-- change to your Vosk model path
+VOSK_MODEL_PATH = r"C:\models\vosk-model-en-us-0.22"  # change to your model path
 SAMPLE_RATE = 16000
 COMMANDS_FILE = "commands.json"
 WAKEWORD = "computer"
+BLOCKSIZE = 4000  # 0.25s per block at 16kHz
 
 
 # -----------------------------
@@ -33,6 +34,37 @@ def load_commands():
 
 commands = load_commands()
 vosk_model = Model(VOSK_MODEL_PATH)
+
+
+# -----------------------------
+# SAFE FLOAT32 → INT16 (for Talk button)
+# -----------------------------
+def float32_to_int16(audio):
+    data = audio.flatten()
+    data = np.nan_to_num(data, nan=0.0, posinf=0.0, neginf=0.0)
+    data = np.clip(data, -1.0, 1.0)
+    return (data * 32767).astype(np.int16).tobytes()
+
+
+# -----------------------------
+# NOISE SUPPRESSION (light)
+# -----------------------------
+def noise_suppress(audio_bytes, threshold=200):
+    data = np.frombuffer(audio_bytes, dtype=np.int16).copy()
+    mask = np.abs(data) < threshold
+    data[mask] = 0
+    return data.astype(np.int16).tobytes()
+
+
+# -----------------------------
+# AUTO-GAIN CONTROL (gentle)
+# -----------------------------
+def apply_agc(audio_bytes):
+    data = np.frombuffer(audio_bytes, dtype=np.int16).copy()
+    peak = np.max(np.abs(data)) + 1e-6
+    gain = min(1.5, 20000.0 / peak)
+    data = np.clip(data * gain, -32767, 32767)
+    return data.astype(np.int16).tobytes()
 
 
 # -----------------------------
@@ -66,7 +98,7 @@ def handle_command(text: str) -> str:
 
 
 # -----------------------------
-# WAKEWORD MATCHING (FUZZY)
+# FUZZY WAKEWORD MATCHING
 # -----------------------------
 def is_wakeword(text: str) -> bool:
     text = text.lower().strip()
@@ -80,27 +112,6 @@ def is_wakeword(text: str) -> bool:
 
 
 # -----------------------------
-# NOISE SUPPRESSION (light)
-# -----------------------------
-def noise_suppress(audio_bytes, threshold=200):
-    data = np.frombuffer(audio_bytes, dtype=np.int16).copy()
-    mask = np.abs(data) < threshold
-    data[mask] = 0
-    return data.astype(np.int16).tobytes()
-
-
-# -----------------------------
-# AUTO-GAIN CONTROL (gentle)
-# -----------------------------
-def apply_agc(audio_bytes):
-    data = np.frombuffer(audio_bytes, dtype=np.int16).copy()
-    peak = np.max(np.abs(data)) + 1e-6
-    gain = min(1.5, 20000.0 / peak)
-    data = np.clip(data * gain, -32767, 32767)
-    return data.astype(np.int16).tobytes()
-
-
-# -----------------------------
 # UI SIGNALS
 # -----------------------------
 class UiSignals(QObject):
@@ -108,15 +119,13 @@ class UiSignals(QObject):
 
 
 # -----------------------------
-# CONTINUOUS KEYWORD SPOTTING STREAM
+# CONTINUOUS WAKEWORD + 5s COMMAND LISTENING
 # -----------------------------
 class KWSStream(threading.Thread):
     def __init__(self, signals: UiSignals):
         super().__init__(daemon=True)
         self.signals = signals
         self._running = True
-        self._armed_for_command = False
-        self._cooldown = 0
 
     def run(self):
         recognizer = KaldiRecognizer(vosk_model, SAMPLE_RATE)
@@ -124,12 +133,12 @@ class KWSStream(threading.Thread):
 
         with sd.RawInputStream(
             samplerate=SAMPLE_RATE,
-            blocksize=4000,
+            blocksize=BLOCKSIZE,
             dtype="int16",
             channels=1,
         ) as stream:
             while self._running:
-                raw = stream.read(4000)[0]
+                raw = stream.read(BLOCKSIZE)[0]
                 data = bytes(raw)
 
                 data = noise_suppress(data)
@@ -150,23 +159,48 @@ class KWSStream(threading.Thread):
                 if not text:
                     continue
 
-                if self._cooldown > 0:
-                    self._cooldown -= 1
-                    continue
-
                 # Wake-word detection
-                if not self._armed_for_command and is_wakeword(text):
-                    self._armed_for_command = True
-                    self._cooldown = 2
+                if is_wakeword(text):
                     winsound.Beep(1200, 120)
-                    self.signals.status.emit("Wake-word COMPUTER detected. Say your command.")
+                    self.signals.status.emit("Wake-word COMPUTER detected. Listening for 5 seconds…")
+                    self.listen_for_command(stream)
+                    # after this returns, loop continues and waits for wake word again
                     continue
 
-                # Command capture after wake-word
-                if self._armed_for_command and text:
-                    self._armed_for_command = False
-                    response = handle_command(text)
-                    self.signals.status.emit(response)
+    def listen_for_command(self, stream):
+        """Use the SAME stream to record ~5 seconds and process as a command."""
+        duration = 5.0
+        total_samples = int(duration * SAMPLE_RATE)
+        collected = []
+        samples = 0
+
+        while samples < total_samples and self._running:
+            raw = stream.read(BLOCKSIZE)[0]
+            collected.append(bytes(raw))
+            samples += BLOCKSIZE
+
+        audio_bytes = b"".join(collected)
+        audio_bytes = noise_suppress(audio_bytes)
+        audio_bytes = apply_agc(audio_bytes)
+
+        recognizer = KaldiRecognizer(vosk_model, SAMPLE_RATE)
+        if recognizer.AcceptWaveform(audio_bytes):
+            result = recognizer.Result()
+        else:
+            result = recognizer.FinalResult()
+
+        try:
+            j = json.loads(result)
+            text = j.get("text", "").strip()
+        except:
+            text = ""
+
+        if not text:
+            self.signals.status.emit("I didn't catch that.")
+            return
+
+        response = handle_command(text)
+        self.signals.status.emit(response)
 
     def stop(self):
         self._running = False
@@ -191,13 +225,13 @@ class OneShotListener(threading.Thread):
                 dtype="float32",
             )
             sd.wait()
-            audio = (audio.flatten() * 32767).astype(np.int16).tobytes()
 
-            audio = noise_suppress(audio)
-            audio = apply_agc(audio)
+            audio_bytes = float32_to_int16(audio)
+            audio_bytes = noise_suppress(audio_bytes)
+            audio_bytes = apply_agc(audio_bytes)
 
             recognizer = KaldiRecognizer(vosk_model, SAMPLE_RATE)
-            if recognizer.AcceptWaveform(audio):
+            if recognizer.AcceptWaveform(audio_bytes):
                 result = recognizer.Result()
             else:
                 result = recognizer.FinalResult()
