@@ -2,3 +2,4 @@ sounddevice
 vosk
 numpy
 PyQt6
+winsound

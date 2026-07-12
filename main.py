@@ -3,6 +3,8 @@ import json
 import os
 import threading
 import subprocess
+import difflib
+import winsound
 
 import numpy as np
 import sounddevice as sd
@@ -13,12 +15,15 @@ from PyQt6.QtCore import Qt, pyqtSignal, QObject
 
 
 # ---- CONFIG ----
-VOSK_MODEL_PATH = r"C:\models\vosk-model-en-us-0.22"  # change to your Vosk model path
+VOSK_MODEL_PATH = r"C:\models\vosk-model-en-us-0.22"  # <-- change to your Vosk model path
 SAMPLE_RATE = 16000
 COMMANDS_FILE = "commands.json"
 WAKEWORD = "computer"
 
 
+# -----------------------------
+# LOAD COMMANDS
+# -----------------------------
 def load_commands():
     if not os.path.exists(COMMANDS_FILE):
         return {}
@@ -30,24 +35,26 @@ commands = load_commands()
 vosk_model = Model(VOSK_MODEL_PATH)
 
 
+# -----------------------------
+# FUZZY COMMAND ROUTER
+# -----------------------------
 def handle_command(text: str) -> str:
     cmd = text.lower().strip()
-    best_key = None
-    for key in commands.keys():
-        if key in cmd:
-            best_key = key
-            break
 
-    if not best_key:
-        return "I don't know how to do that yet."
+    keys = list(commands.keys())
+    match = difflib.get_close_matches(cmd, keys, n=1, cutoff=0.55)
 
+    if not match:
+        return f"I heard: '{cmd}', but I don't know that command."
+
+    best_key = match[0]
     entry = commands[best_key]
     action = entry.get("action")
     target = entry.get("target")
 
     if action == "run":
         subprocess.Popen(target, shell=True)
-        return f"Running {target}"
+        return f"Running {best_key}"
 
     if action == "system":
         if target == "volume_up":
@@ -58,22 +65,58 @@ def handle_command(text: str) -> str:
     return "Command found but no action implemented."
 
 
+# -----------------------------
+# WAKEWORD MATCHING (FUZZY)
+# -----------------------------
+def is_wakeword(text: str) -> bool:
+    text = text.lower().strip()
+
+    if WAKEWORD in text:
+        return True
+
+    candidates = ["computer", "compter", "commuter", "comp you ter"]
+    matches = difflib.get_close_matches(text, candidates, cutoff=0.70)
+    return len(matches) > 0
+
+
+# -----------------------------
+# NOISE SUPPRESSION (light)
+# -----------------------------
+def noise_suppress(audio_bytes, threshold=200):
+    data = np.frombuffer(audio_bytes, dtype=np.int16).copy()
+    mask = np.abs(data) < threshold
+    data[mask] = 0
+    return data.astype(np.int16).tobytes()
+
+
+# -----------------------------
+# AUTO-GAIN CONTROL (gentle)
+# -----------------------------
+def apply_agc(audio_bytes):
+    data = np.frombuffer(audio_bytes, dtype=np.int16).copy()
+    peak = np.max(np.abs(data)) + 1e-6
+    gain = min(1.5, 20000.0 / peak)
+    data = np.clip(data * gain, -32767, 32767)
+    return data.astype(np.int16).tobytes()
+
+
+# -----------------------------
+# UI SIGNALS
+# -----------------------------
 class UiSignals(QObject):
     status = pyqtSignal(str)
 
 
+# -----------------------------
+# CONTINUOUS KEYWORD SPOTTING STREAM
+# -----------------------------
 class KWSStream(threading.Thread):
-    """
-    Keyword spotting stream:
-    - Continuously listens with Vosk
-    - If it hears WAKEWORD ("computer"), it arms for the next utterance as a command
-    """
-
     def __init__(self, signals: UiSignals):
         super().__init__(daemon=True)
         self.signals = signals
         self._running = True
         self._armed_for_command = False
+        self._cooldown = 0
 
     def run(self):
         recognizer = KaldiRecognizer(vosk_model, SAMPLE_RATE)
@@ -81,12 +124,17 @@ class KWSStream(threading.Thread):
 
         with sd.RawInputStream(
             samplerate=SAMPLE_RATE,
-            blocksize=8000,
+            blocksize=4000,
             dtype="int16",
             channels=1,
         ) as stream:
             while self._running:
-                data = bytes(stream.read(8000)[0])
+                raw = stream.read(4000)[0]
+                data = bytes(raw)
+
+                data = noise_suppress(data)
+                data = apply_agc(data)
+
                 if recognizer.AcceptWaveform(data):
                     result = recognizer.Result()
                 else:
@@ -102,9 +150,15 @@ class KWSStream(threading.Thread):
                 if not text:
                     continue
 
+                if self._cooldown > 0:
+                    self._cooldown -= 1
+                    continue
+
                 # Wake-word detection
-                if not self._armed_for_command and WAKEWORD in text:
+                if not self._armed_for_command and is_wakeword(text):
                     self._armed_for_command = True
+                    self._cooldown = 2
+                    winsound.Beep(1200, 120)
                     self.signals.status.emit("Wake-word COMPUTER detected. Say your command.")
                     continue
 
@@ -118,14 +172,10 @@ class KWSStream(threading.Thread):
         self._running = False
 
 
+# -----------------------------
+# ONE-SHOT LISTENER (Talk button)
+# -----------------------------
 class OneShotListener(threading.Thread):
-    """
-    One-shot listener for the Talk button:
-    - Records a short chunk
-    - Runs Vosk
-    - Treats the result as a command directly
-    """
-
     def __init__(self, signals: UiSignals, duration: float = 4.0):
         super().__init__(daemon=True)
         self.signals = signals
@@ -141,7 +191,10 @@ class OneShotListener(threading.Thread):
                 dtype="float32",
             )
             sd.wait()
-            audio = (audio.flatten() * 32767).astype("int16").tobytes()
+            audio = (audio.flatten() * 32767).astype(np.int16).tobytes()
+
+            audio = noise_suppress(audio)
+            audio = apply_agc(audio)
 
             recognizer = KaldiRecognizer(vosk_model, SAMPLE_RATE)
             if recognizer.AcceptWaveform(audio):
@@ -161,6 +214,9 @@ class OneShotListener(threading.Thread):
             self.signals.status.emit(f"Error: {e}")
 
 
+# -----------------------------
+# MAIN WINDOW
+# -----------------------------
 class VoiceWindow(QWidget):
     def __init__(self):
         super().__init__()
@@ -199,6 +255,9 @@ class VoiceWindow(QWidget):
         event.accept()
 
 
+# -----------------------------
+# MAIN
+# -----------------------------
 def main():
     app = QApplication(sys.argv)
     win = VoiceWindow()
