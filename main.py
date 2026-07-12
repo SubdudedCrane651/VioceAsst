@@ -1,9 +1,8 @@
 import sys
-import threading
-import subprocess
-import time
 import json
 import os
+import threading
+import subprocess
 
 import numpy as np
 import sounddevice as sd
@@ -13,60 +12,26 @@ from PyQt6.QtWidgets import QApplication, QWidget, QVBoxLayout, QPushButton, QLa
 from PyQt6.QtCore import Qt, pyqtSignal, QObject
 
 
-# -----------------------------
-# CONFIG
-# -----------------------------
-VOSK_MODEL_PATH = r"C:\models\vosk-model-en-us-0.22"
+# ---- CONFIG ----
+VOSK_MODEL_PATH = r"C:\models\vosk-model-en-us-0.22"  # change to your Vosk model path
 SAMPLE_RATE = 16000
 COMMANDS_FILE = "commands.json"
+WAKEWORD = "computer"
 
 
-# -----------------------------
-# Load commands.json
-# -----------------------------
 def load_commands():
     if not os.path.exists(COMMANDS_FILE):
-        print("commands.json not found!")
         return {}
-    with open(COMMANDS_FILE, "r") as f:
+    with open(COMMANDS_FILE, "r", encoding="utf-8") as f:
         return json.load(f)
 
+
 commands = load_commands()
-
-
-# -----------------------------
-# MODELS
-# -----------------------------
 vosk_model = Model(VOSK_MODEL_PATH)
 
 
-# -----------------------------
-# STT: Vosk (commands)
-# -----------------------------
-def transcribe_vosk(audio_data, sample_rate):
-    recognizer = KaldiRecognizer(vosk_model, sample_rate)
-    recognizer.SetWords(True)
-
-    pcm_data = (audio_data * 32767).astype("int16").tobytes()
-
-    if recognizer.AcceptWaveform(pcm_data):
-        result = recognizer.Result()
-    else:
-        result = recognizer.FinalResult()
-
-    text = json.loads(result).get("text", "")
-    print(f"[stt] text='{text}'")
-    return text.strip()
-
-
-# -----------------------------
-# Command router (JSON-based)
-# -----------------------------
-def handle_command(text: str):
+def handle_command(text: str) -> str:
     cmd = text.lower().strip()
-    print(f"[assistant] understood: {cmd}")
-
-    # fuzzy match: find closest command key
     best_key = None
     for key in commands.keys():
         if key in cmd:
@@ -93,39 +58,99 @@ def handle_command(text: str):
     return "Command found but no action implemented."
 
 
-# -----------------------------
-# Worker signals
-# -----------------------------
-class WorkerSignals(QObject):
+class UiSignals(QObject):
     status = pyqtSignal(str)
 
 
-# -----------------------------
-# Audio worker (Vosk STT)
-# -----------------------------
-class AudioWorker(threading.Thread):
-    def __init__(self, signals: WorkerSignals, duration: float = 4.0):
+class KWSStream(threading.Thread):
+    """
+    Keyword spotting stream:
+    - Continuously listens with Vosk
+    - If it hears WAKEWORD ("computer"), it arms for the next utterance as a command
+    """
+
+    def __init__(self, signals: UiSignals):
+        super().__init__(daemon=True)
+        self.signals = signals
+        self._running = True
+        self._armed_for_command = False
+
+    def run(self):
+        recognizer = KaldiRecognizer(vosk_model, SAMPLE_RATE)
+        recognizer.SetWords(True)
+
+        with sd.RawInputStream(
+            samplerate=SAMPLE_RATE,
+            blocksize=8000,
+            dtype="int16",
+            channels=1,
+        ) as stream:
+            while self._running:
+                data = bytes(stream.read(8000)[0])
+                if recognizer.AcceptWaveform(data):
+                    result = recognizer.Result()
+                else:
+                    result = recognizer.PartialResult()
+
+                try:
+                    j = json.loads(result)
+                except Exception:
+                    continue
+
+                text = j.get("text", "") or j.get("partial", "")
+                text = text.strip().lower()
+                if not text:
+                    continue
+
+                # Wake-word detection
+                if not self._armed_for_command and WAKEWORD in text:
+                    self._armed_for_command = True
+                    self.signals.status.emit("Wake-word COMPUTER detected. Say your command.")
+                    continue
+
+                # Command capture after wake-word
+                if self._armed_for_command and text:
+                    self._armed_for_command = False
+                    response = handle_command(text)
+                    self.signals.status.emit(response)
+
+    def stop(self):
+        self._running = False
+
+
+class OneShotListener(threading.Thread):
+    """
+    One-shot listener for the Talk button:
+    - Records a short chunk
+    - Runs Vosk
+    - Treats the result as a command directly
+    """
+
+    def __init__(self, signals: UiSignals, duration: float = 4.0):
         super().__init__(daemon=True)
         self.signals = signals
         self.duration = duration
 
     def run(self):
         try:
-            self.signals.status.emit("Listening...")
-            sample_rate = SAMPLE_RATE
-
-            self.signals.status.emit("Recording...")
+            self.signals.status.emit("Listening…")
             audio = sd.rec(
-                int(self.duration * sample_rate),
-                samplerate=sample_rate,
+                int(self.duration * SAMPLE_RATE),
+                samplerate=SAMPLE_RATE,
                 channels=1,
                 dtype="float32",
             )
             sd.wait()
-            audio = audio.flatten()
+            audio = (audio.flatten() * 32767).astype("int16").tobytes()
 
-            self.signals.status.emit("Transcribing...")
-            text = transcribe_vosk(audio, sample_rate)
+            recognizer = KaldiRecognizer(vosk_model, SAMPLE_RATE)
+            if recognizer.AcceptWaveform(audio):
+                result = recognizer.Result()
+            else:
+                result = recognizer.FinalResult()
+
+            j = json.loads(result)
+            text = j.get("text", "").strip()
             if not text:
                 self.signals.status.emit("I didn't catch that.")
                 return
@@ -136,54 +161,44 @@ class AudioWorker(threading.Thread):
             self.signals.status.emit(f"Error: {e}")
 
 
-# -----------------------------
-# PyQt6 UI
-# -----------------------------
 class VoiceWindow(QWidget):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("My Voice Assistant")
-        self.setFixedSize(320, 160)
+        self.setWindowTitle("COMPUTER Assistant")
+        self.setFixedSize(380, 200)
 
         layout = QVBoxLayout()
         layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
-        self.label = QLabel("Press the button and speak")
+        self.label = QLabel("Say “computer” then your command,\nor press Talk.")
         self.label.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
         self.button = QPushButton("Talk")
-        self.button.clicked.connect(self.on_button_clicked)
-
         layout.addWidget(self.label)
         layout.addWidget(self.button)
         self.setLayout(layout)
 
-        self.signals = WorkerSignals()
+        self.signals = UiSignals()
         self.signals.status.connect(self.update_status)
 
-        self._busy = False
+        self.kws = KWSStream(self.signals)
+        self.kws.start()
+
+        self.button.clicked.connect(self.on_button_clicked)
 
     def update_status(self, msg: str):
         self.label.setText(msg)
 
     def on_button_clicked(self):
-        if self._busy:
-            return
-        self._busy = True
-        self.label.setText("Starting...")
-        worker = AudioWorker(self.signals, duration=4.0)
-        worker.start()
+        listener = OneShotListener(self.signals, duration=4.0)
+        listener.start()
 
-        def reset_busy():
-            time.sleep(5)
-            self._busy = False
-
-        threading.Thread(target=reset_busy, daemon=True).start()
+    def closeEvent(self, event):
+        if hasattr(self, "kws"):
+            self.kws.stop()
+        event.accept()
 
 
-# -----------------------------
-# Main
-# -----------------------------
 def main():
     app = QApplication(sys.argv)
     win = VoiceWindow()

@@ -1,6 +1,4 @@
-PyQt6
-soundevice
+sounddevice
 vosk
-pyaudio
-faster-whisper
 numpy
+PyQt6
