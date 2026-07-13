@@ -22,14 +22,19 @@ BLOCKSIZE = 4000  # 0.25s per block
 COMMANDS_FILE = "commands.json"
 WAKEWORD = "computer"
 
-SEARCH_DIRS = [
-    os.path.expanduser(r"~\Documents"),
-    os.path.expanduser(r"~\Desktop"),
-    os.path.expanduser(r"~\Downloads"),
-    os.path.expanduser(r"~\Pictures"),
-    os.path.expanduser(r"~F:\Richard")
-]
+# -----------------------------
+# LOAD DIRECTORIES FROM directory.json
+# -----------------------------
+def load_directories():
+    try:
+        with open("directory.json", "r", encoding="utf-8") as f:
+            data = json.load(f)
+            dirs = data.get("directories", [])
+            return [os.path.expandvars(os.path.expanduser(d)) for d in dirs]
+    except Exception:
+        return []
 
+SEARCH_DIRS = load_directories()
 
 # -----------------------------
 # LOAD COMMANDS
