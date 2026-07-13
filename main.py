@@ -5,6 +5,7 @@ import threading
 import subprocess
 import difflib
 import winsound
+import re
 
 import numpy as np
 import sounddevice as sd
@@ -20,6 +21,14 @@ SAMPLE_RATE = 16000
 BLOCKSIZE = 4000  # 0.25s per block
 COMMANDS_FILE = "commands.json"
 WAKEWORD = "computer"
+
+SEARCH_DIRS = [
+    os.path.expanduser(r"~\Documents"),
+    os.path.expanduser(r"~\Desktop\\Python Programs - For BOSGAME"),
+    os.path.expanduser(r"~\Downloads"),
+    os.path.expanduser(r"~\Pictures"),
+    os.path.expanduser(r"~F:\Richard")
+]
 
 
 # -----------------------------
@@ -56,6 +65,56 @@ def apply_agc(audio_bytes):
 
 
 # -----------------------------
+# NATURAL-SPEECH FILE OPENING
+# -----------------------------
+def extract_keywords(text: str) -> str:
+    stopwords = {
+        "open", "the", "file", "document", "spreadsheet", "photo", "picture",
+        "image", "about", "for", "of", "my", "latest", "newest", "last",
+        "that", "this", "a", "an", "pdf", "word", "excel", "powerpoint","shortcut"
+    }
+    words = re.findall(r"\w+", text.lower())
+    filtered = [w for w in words if w not in stopwords]
+    return " ".join(filtered)
+
+
+def find_best_file(keywords: str) -> str | None:
+    if not keywords:
+        return None
+
+    best_path = None
+    best_score = 0.0
+
+    for base in SEARCH_DIRS:
+        if not os.path.isdir(base):
+            continue
+        for root, dirs, files in os.walk(base):
+            for f in files:
+                name = os.path.splitext(f)[0].lower()
+                score = difflib.SequenceMatcher(None, keywords, name).ratio()
+                if score > best_score:
+                    best_score = score
+                    best_path = os.path.join(root, f)
+
+    if best_score >= 0.5:
+        return best_path
+    return None
+
+
+def handle_natural_file_open(text: str) -> str | None:
+    keywords = extract_keywords(text)
+    path = find_best_file(keywords)
+    if not path:
+        return None
+
+    try:
+        subprocess.Popen(f'"{path}"', shell=True)
+        return f"Opening {os.path.basename(path)}"
+    except Exception as e:
+        return f"Found a file but could not open it: {e}"
+
+
+# -----------------------------
 # FUZZY COMMAND ROUTER
 # -----------------------------
 def handle_command(text: str) -> str:
@@ -63,17 +122,24 @@ def handle_command(text: str) -> str:
     keys = list(commands.keys())
     match = difflib.get_close_matches(cmd, keys, n=1, cutoff=0.55)
 
-    if not match:
-        return f"I heard: '{cmd}', but I don't know that command."
+    if match:
+        best_key = match[0]
+        entry = commands[best_key]
+        action = entry.get("action")
+        target = entry.get("target")
 
-    best_key = match[0]
-    entry = commands[best_key]
+        if action == "run":
+            subprocess.Popen(target, shell=True)
+            return f"Running {best_key}"
 
-    if entry.get("action") == "run":
-        subprocess.Popen(entry.get("target"), shell=True)
-        return f"Running {best_key}"
+        return "Command found but no action implemented."
 
-    return "Command found but no action implemented."
+    # Fallback: natural-speech file opening
+    file_result = handle_natural_file_open(text)
+    if file_result:
+        return file_result
+
+    return f"I heard: '{cmd}', but I don't know that command."
 
 
 # -----------------------------
@@ -118,7 +184,6 @@ class KWSStream(threading.Thread):
                 raw = stream.read(BLOCKSIZE)[0]
                 data = apply_agc(noise_suppress(bytes(raw)))
 
-                # Wake-word detection
                 if recognizer.AcceptWaveform(data):
                     result = recognizer.Result()
                 else:
@@ -141,10 +206,10 @@ class KWSStream(threading.Thread):
                     self.listen_for_command(stream)
                     self.signals.status.emit("Sleeping… Say 'computer' to wake me.")
                     recognizer = KaldiRecognizer(vosk_model, SAMPLE_RATE)
+                    recognizer.SetWords(True)
                     continue
 
     def listen_for_command(self, stream):
-        """Record 5 seconds using SAME stream."""
         duration = 5.0
         total_samples = int(duration * SAMPLE_RATE)
         samples = 0
