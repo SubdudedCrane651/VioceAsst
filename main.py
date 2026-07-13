@@ -24,7 +24,7 @@ WAKEWORD = "computer"
 
 SEARCH_DIRS = [
     os.path.expanduser(r"~\Documents"),
-    os.path.expanduser(r"~\Desktop\\Python Programs - For BOSGAME"),
+    os.path.expanduser(r"~\Desktop"),
     os.path.expanduser(r"~\Downloads"),
     os.path.expanduser(r"~\Pictures"),
     os.path.expanduser(r"~F:\Richard")

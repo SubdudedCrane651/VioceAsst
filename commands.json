@@ -79,9 +79,5 @@
   "open vscode": {
     "action": "run",
     "target": "code.exe"
-  },
-  "open EV calc": {
-    "action": "run",
-    "target": "\"F:\\Richard\\Electricity for Equinox.xlsm\""
   }
 }
