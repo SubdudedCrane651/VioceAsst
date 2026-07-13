@@ -74,10 +74,10 @@
   },
   "open visual studio": {
     "action": "run",
-    "target": "devenv.exe"
+    "target": "\"C:\\Program Files\\Microsoft Visual Studio\\2022\\Community\\Common7\\IDE\\devenv.exe\""
   },
   "open vscode": {
     "action": "run",
-    "target": "code.exe"
+    "target": "\"C:\\Users\\Richard\\AppData\\Local\\Programs\\Microsoft VS Code\\Code.exe\""
   }
 }
