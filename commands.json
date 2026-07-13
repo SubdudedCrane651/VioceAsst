@@ -70,7 +70,7 @@
 
   "open edge": {
     "action": "run",
-    "target": "msedge.exe"
+    "target": "\"C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe\""
   },
   "open visual studio": {
     "action": "run",
